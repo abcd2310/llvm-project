@@ -7373,9 +7373,8 @@ static bool getMiscPatterns(MachineInstr &Root,
 }
 
 static bool getGatherPattern(MachineInstr &Root,
-                                SmallVectorImpl<unsigned> &Patterns,
-                                unsigned LoadLaneOpCode,
-                                unsigned NumLanes) {
+                             SmallVectorImpl<unsigned> &Patterns,
+                             unsigned LoadLaneOpCode, unsigned NumLanes) {
   const MachineRegisterInfo &MRI = Root.getMF()->getRegInfo();
   const TargetRegisterInfo *TRI =
       Root.getMF()->getSubtarget().getRegisterInfo();
@@ -7417,17 +7416,17 @@ static bool getGatherPattern(MachineInstr &Root,
     return false;
 
   switch (NumLanes) {
-    case 4:
-      Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i32);
-      break;
-    case 8:
-      Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i16);
-      break;
-    case 16:
-      Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i8);
-      break;
-    default:
-      llvm_unreachable("Got bad number of lanes for gather pattern.");
+  case 4:
+    Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i32);
+    break;
+  case 8:
+    Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i16);
+    break;
+  case 16:
+    Patterns.push_back(AArch64MachineCombinerPattern::GATHER_i8);
+    break;
+  default:
+    llvm_unreachable("Got bad number of lanes for gather pattern.");
   }
 
   return true;
@@ -7441,23 +7440,24 @@ static bool getLoadPatterns(MachineInstr &Root,
 
   // The pattern searches for loads into single lanes.
   switch (Root.getOpcode()) {
-    case AArch64::LD1i32:
-      return getGatherPattern(Root, Patterns, Root.getOpcode(), 4);
-    case AArch64::LD1i16:
-      return getGatherPattern(Root, Patterns, Root.getOpcode(), 8);
-    case AArch64::LD1i8:
-      return getGatherPattern(Root, Patterns, Root.getOpcode(), 16);
-    default:
-      return false;
+  case AArch64::LD1i32:
+    return getGatherPattern(Root, Patterns, Root.getOpcode(), 4);
+  case AArch64::LD1i16:
+    return getGatherPattern(Root, Patterns, Root.getOpcode(), 8);
+  case AArch64::LD1i8:
+    return getGatherPattern(Root, Patterns, Root.getOpcode(), 16);
+  default:
+    return false;
   }
 }
 
-static void generateGatherPattern(
-    MachineInstr &Root, SmallVectorImpl<MachineInstr *> &InsInstrs,
-    SmallVectorImpl<MachineInstr *> &DelInstrs,
-    DenseMap<Register, unsigned> &InstrIdxForVirtReg, unsigned Pattern,
-    unsigned NumLanes) {
-  
+static void
+generateGatherPattern(MachineInstr &Root,
+                      SmallVectorImpl<MachineInstr *> &InsInstrs,
+                      SmallVectorImpl<MachineInstr *> &DelInstrs,
+                      DenseMap<Register, unsigned> &InstrIdxForVirtReg,
+                      unsigned Pattern, unsigned NumLanes) {
+
   MachineFunction &MF = *Root.getParent()->getParent();
   MachineRegisterInfo &MRI = MF.getRegInfo();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
@@ -7469,7 +7469,7 @@ static void generateGatherPattern(
     LoadToLaneInstrs.push_back(CurrInstr);
     CurrInstr = MRI.getUniqueVRegDef(CurrInstr->getOperand(1).getReg());
   }
-  
+
   MachineInstr *SubregToReg = CurrInstr;
   LoadToLaneInstrs.push_back(
       MRI.getUniqueVRegDef(SubregToReg->getOperand(2).getReg()));
@@ -7494,26 +7494,27 @@ static void generateGatherPattern(
   };
 
   // Helper to create load instruction based on opcode
-  auto CreateLoadInstruction = [&](unsigned NumLanes, Register DestReg, 
-                                  Register OffsetReg) -> MachineInstrBuilder {
-      unsigned Opcode;
-      switch (NumLanes) {
-        case 4:
-          Opcode = AArch64::LDRSui;
-          break;
-        case 8:
-          Opcode = AArch64::LDRHui;
-          break;
-        case 16:
-          Opcode = AArch64::LDRBui;
-          break;
-        default:
-          llvm_unreachable("Got unsupported number of lanes in machine-combiner gather pattern");
-      }
-      // Immediate offset load
-      return BuildMI(MF, MIMetadata(Root), TII->get(Opcode), DestReg)
-            .addReg(OffsetReg)
-            .addImm(0); // immediate offset
+  auto CreateLoadInstruction = [&](unsigned NumLanes, Register DestReg,
+                                   Register OffsetReg) -> MachineInstrBuilder {
+    unsigned Opcode;
+    switch (NumLanes) {
+    case 4:
+      Opcode = AArch64::LDRSui;
+      break;
+    case 8:
+      Opcode = AArch64::LDRHui;
+      break;
+    case 16:
+      Opcode = AArch64::LDRBui;
+      break;
+    default:
+      llvm_unreachable(
+          "Got unsupported number of lanes in machine-combiner gather pattern");
+    }
+    // Immediate offset load
+    return BuildMI(MF, MIMetadata(Root), TII->get(Opcode), DestReg)
+        .addReg(OffsetReg)
+        .addImm(0); // immediate offset
   };
 
   // Load the remaining lanes into register 0.
@@ -7522,7 +7523,8 @@ static void generateGatherPattern(
                        LoadToLaneInstrsAscending.begin() + NumLanes / 2);
   auto PrevReg = SubregToReg->getOperand(0).getReg();
   for (auto [Index, LoadInstr] : llvm::enumerate(LanesToLoadToReg0)) {
-    PrevReg = LoadLaneToRegister(LoadInstr, PrevReg, Index + 1, LoadInstr->getOperand(3).getReg());
+    PrevReg = LoadLaneToRegister(LoadInstr, PrevReg, Index + 1,
+                                 LoadInstr->getOperand(3).getReg());
     DelInstrs.push_back(LoadInstr);
   }
   auto LastLoadReg0 = PrevReg;
@@ -7532,12 +7534,13 @@ static void generateGatherPattern(
   auto OriginalSplitLoad = *std::next(LoadToLaneInstrsAscending.begin(), NumLanes / 2);
   auto DestRegForMiddleIndex = MRI.createVirtualRegister(
       MRI.getRegClass(Lane0Load->getOperand(0).getReg()));
-  
-  MachineInstrBuilder MiddleIndexLoadInstr = CreateLoadInstruction(
-      NumLanes, DestRegForMiddleIndex, 
-      OriginalSplitLoad->getOperand(3).getReg());
-  
-  InstrIdxForVirtReg.insert(std::make_pair(DestRegForMiddleIndex, InsInstrs.size()));
+
+  MachineInstrBuilder MiddleIndexLoadInstr =
+      CreateLoadInstruction(NumLanes, DestRegForMiddleIndex,
+                            OriginalSplitLoad->getOperand(3).getReg());
+
+  InstrIdxForVirtReg.insert(
+      std::make_pair(DestRegForMiddleIndex, InsInstrs.size()));
   InsInstrs.push_back(MiddleIndexLoadInstr);
   DelInstrs.push_back(OriginalSplitLoad);
 
@@ -7545,17 +7548,18 @@ static void generateGatherPattern(
   auto DestRegForSubregToReg = MRI.createVirtualRegister(FPR128RegClass);
   unsigned SubregType;
   switch (NumLanes) {
-    case 4:
-      SubregType = AArch64::ssub;
-      break;
-    case 8:
-      SubregType = AArch64::hsub;
-      break;
-    case 16:
-      SubregType = AArch64::bsub;
-      break;
-    default:
-      llvm_unreachable("Got invalid NumLanes for machine-combiner gather pattern");
+  case 4:
+    SubregType = AArch64::ssub;
+    break;
+  case 8:
+    SubregType = AArch64::hsub;
+    break;
+  case 16:
+    SubregType = AArch64::bsub;
+    break;
+  default:
+    llvm_unreachable(
+        "Got invalid NumLanes for machine-combiner gather pattern");
   }
 
   auto SubRegToRegInstr =
@@ -7573,7 +7577,8 @@ static void generateGatherPattern(
       LoadToLaneInstrsAscending.begin() + NumLanes / 2 + 1, LoadToLaneInstrsAscending.end());
   PrevReg = SubRegToRegInstr->getOperand(0).getReg();
   for (auto [Index, LoadInstr] : llvm::enumerate(LanesToLoadToReg1)) {
-    PrevReg = LoadLaneToRegister(LoadInstr, PrevReg, Index + 1, LoadInstr->getOperand(3).getReg());
+    PrevReg = LoadLaneToRegister(LoadInstr, PrevReg, Index + 1,
+                                 LoadInstr->getOperand(3).getReg());
     if (Index == NumLanes / 2 - 2) {
       break;
     }
@@ -8967,11 +8972,13 @@ void AArch64InstrInfo::genAlternativeCodeSequence(
     break;
   }
   case AArch64MachineCombinerPattern::GATHER_i16: {
-    generateGatherPattern(Root, InsInstrs, DelInstrs, InstrIdxForVirtReg, Pattern, 8);
+    generateGatherPattern(Root, InsInstrs, DelInstrs, InstrIdxForVirtReg,
+                          Pattern, 8);
     break;
   }
   case AArch64MachineCombinerPattern::GATHER_i8: {
-    generateGatherPattern(Root, InsInstrs, DelInstrs, InstrIdxForVirtReg, Pattern, 16);
+    generateGatherPattern(Root, InsInstrs, DelInstrs, InstrIdxForVirtReg,
+                          Pattern, 16);
     break;
   }
 
