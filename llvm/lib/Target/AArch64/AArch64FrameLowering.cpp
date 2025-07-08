@@ -330,13 +330,36 @@ static int64_t getArgumentStackToRestore(MachineFunction &MF,
 
 static bool produceCompactUnwindFrame(MachineFunction &MF);
 static bool needsWinCFI(const MachineFunction &MF);
-static StackOffset getZPRStackSize(const MachineFunction &MF);
-static StackOffset getPPRStackSize(const MachineFunction &MF);
-static StackOffset getSVEStackSize(const MachineFunction &MF);
 static Register findScratchNonCalleeSaveRegister(MachineBasicBlock *MBB,
                                                  bool HasCall = false);
 static bool requiresSaveVG(const MachineFunction &MF);
-static bool hasSVEStackSize(const MachineFunction &MF);
+
+static unsigned getStackHazardSize(const MachineFunction &MF) {
+  return MF.getSubtarget<AArch64Subtarget>().getStreamingHazardSize();
+}
+
+/// Returns the size of the entire ZPR stackframe (calleesaves + spills).
+static StackOffset getZPRStackSize(const MachineFunction &MF) {
+  const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
+  return StackOffset::getScalable(AFI->getStackSizeZPR());
+}
+
+/// Returns the size of the entire PPR stackframe (calleesaves + spills).
+static StackOffset getPPRStackSize(const MachineFunction &MF) {
+  const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
+  return StackOffset::getScalable(AFI->getStackSizePPR());
+}
+
+/// Returns the size of the entire SVE stackframe (PPRs + ZPRs).
+static StackOffset getSVEStackSize(const MachineFunction &MF) {
+  return getZPRStackSize(MF) + getPPRStackSize(MF);
+}
+
+/// Returns true if PPRs are spilled as ZPRs.
+static bool arePPRsSpilledAsZPR(const MachineFunction &MF) {
+  return MF.getSubtarget().getRegisterInfo()->getSpillSize(
+             AArch64::PPRRegClass) == 16;
+}
 
 /// Returns true if a homogeneous prolog or epilog code can be emitted
 /// for the size optimization. If possible, a frame helper call is injected.
@@ -353,8 +376,10 @@ bool AArch64FrameLowering::homogeneousPrologEpilog(
   // TODO: Window is supported yet.
   if (needsWinCFI(MF))
     return false;
+
   // TODO: SVE is not supported yet.
-  if (hasSVEStackSize(MF))
+  auto *AFI = MF.getInfo<AArch64FunctionInfo>();
+  if (AFI->hasSVEStackSize())
     return false;
 
   // Bail on stack adjustment needed on return for simplicity.
@@ -365,7 +390,6 @@ bool AArch64FrameLowering::homogeneousPrologEpilog(
   if (Exit && getArgumentStackToRestore(MF, *Exit))
     return false;
 
-  auto *AFI = MF.getInfo<AArch64FunctionInfo>();
   if (AFI->hasSwiftAsyncContext() || AFI->hasStreamingModeChanges())
     return false;
 
@@ -454,38 +478,6 @@ static unsigned getFixedObjectSize(const MachineFunction &MF,
   }
 }
 
-static unsigned getStackHazardSize(const MachineFunction &MF) {
-  return MF.getSubtarget<AArch64Subtarget>().getStreamingHazardSize();
-}
-
-/// Returns the size of the entire ZPR stackframe (calleesaves + spills).
-static StackOffset getZPRStackSize(const MachineFunction &MF) {
-  const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
-  return StackOffset::getScalable(AFI->getStackSizeZPR());
-}
-
-/// Returns the size of the entire PPR stackframe (calleesaves + spills).
-static StackOffset getPPRStackSize(const MachineFunction &MF) {
-  const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
-  return StackOffset::getScalable(AFI->getStackSizePPR());
-}
-
-/// Returns the size of the entire SVE stackframe (PPRs + ZPRs).
-static StackOffset getSVEStackSize(const MachineFunction &MF) {
-  return getZPRStackSize(MF) + getPPRStackSize(MF);
-}
-
-static bool hasSVEStackSize(const MachineFunction &MF) {
-  const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
-  return AFI->getStackSizeZPR() > 0 || AFI->getStackSizePPR() > 0;
-}
-
-/// Returns true if PPRs are spilled as ZPRs.
-static bool arePPRsSpilledAsZPR(const MachineFunction &MF) {
-  return MF.getSubtarget().getRegisterInfo()->getSpillSize(
-             AArch64::PPRRegClass) == 16;
-}
-
 bool AArch64FrameLowering::canUseRedZone(const MachineFunction &MF) const {
   if (!EnableRedZone)
     return false;
@@ -511,7 +503,7 @@ bool AArch64FrameLowering::canUseRedZone(const MachineFunction &MF) const {
                                  !Subtarget.hasSVE();
 
   return !(MFI.hasCalls() || hasFP(MF) || NumBytes > RedZoneSize ||
-           hasSVEStackSize(MF) || LowerQRegCopyThroughMem);
+           AFI->hasSVEStackSize() || LowerQRegCopyThroughMem);
 }
 
 /// hasFPImpl - Return true if the specified function should have a dedicated
@@ -1190,7 +1182,7 @@ bool AArch64FrameLowering::shouldCombineCSRLocalStackBump(
 
   // When there is an SVE area on the stack, always allocate the
   // callee-saves and spills/locals separately.
-  if (hasSVEStackSize(MF))
+  if (AFI->hasSVEStackSize())
     return false;
 
   return true;
@@ -1634,8 +1626,8 @@ static bool isTargetWindows(const MachineFunction &MF) {
   return MF.getSubtarget<AArch64Subtarget>().isTargetWindows();
 }
 
-// Convenience function to determine whether I is an SVE callee save.
-static bool IsZPRCalleeSave(MachineBasicBlock::iterator I) {
+// Convenience function to determine whether I is part of the ZPR callee saves.
+static bool isPartOfZPRCalleeSaves(MachineBasicBlock::iterator I) {
   switch (I->getOpcode()) {
   default:
     return false;
@@ -1655,8 +1647,8 @@ static bool IsZPRCalleeSave(MachineBasicBlock::iterator I) {
   }
 }
 
-// Convenience function to determine whether I is an SVE predicate callee save.
-static bool IsPPRCalleeSave(MachineBasicBlock::iterator I) {
+// Convenience function to determine whether I is part of the PPR callee saves.
+static bool isPartOfPPRCalleeSaves(MachineBasicBlock::iterator I) {
   switch (I->getOpcode()) {
   default:
     return false;
@@ -1667,8 +1659,9 @@ static bool IsPPRCalleeSave(MachineBasicBlock::iterator I) {
   }
 }
 
-static bool IsSVECalleeSave(MachineBasicBlock::iterator I) {
-  return IsZPRCalleeSave(I) || IsPPRCalleeSave(I);
+// Convenience function to determine whether I is part of the SVE callee saves.
+static bool isPartOfSVECalleeSaves(MachineBasicBlock::iterator I) {
+  return isPartOfZPRCalleeSaves(I) || isPartOfPPRCalleeSaves(I);
 }
 
 static void emitShadowCallStackPrologue(const TargetInstrInfo &TII,
@@ -1912,7 +1905,7 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
       IsFunclet ? getWinEHFuncletFrameSize(MF) : MFI.getStackSize();
   if (!AFI->hasStackFrame() && !windowsRequiresStackProbe(MF, NumBytes)) {
     assert(!HasFP && "unexpected function without stack frame but with FP");
-    assert(!hasSVEStackSize(MF) &&
+    assert(!AFI->hasSVEStackSize() &&
            "unexpected function without stack frame but with SVE objects");
     // All of the stack allocation is for locals.
     AFI->setLocalStackSize(NumBytes);
@@ -1986,14 +1979,14 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
     NumBytes -= FixedObject;
 
     // Now allocate space for the GPR callee saves.
-    while (MBBI != End && IsSVECalleeSave(MBBI))
+    while (MBBI != End && isPartOfSVECalleeSaves(MBBI))
       ++MBBI;
     MBBI = convertCalleeSaveRestoreToSPPrePostIncDec(
         MBB, MBBI, DL, TII, -AFI->getCalleeSavedStackSize(), NeedsWinCFI,
         &HasWinCFI, EmitAsyncCFI);
     NumBytes -= AFI->getCalleeSavedStackSize();
   } else if (CombineSPBump) {
-    assert(!hasSVEStackSize(MF) && "Cannot combine SP bump with SVE");
+    assert(!AFI->hasSVEStackSize() && "Cannot combine SP bump with SVE");
     emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP,
                     StackOffset::getFixed(-NumBytes), TII,
                     MachineInstr::FrameSetup, false, NeedsWinCFI, &HasWinCFI,
@@ -2014,7 +2007,7 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
   // and pre-inc if we decided to combine the callee-save and local stack
   // pointer bump above.
   while (MBBI != End && MBBI->getFlag(MachineInstr::FrameSetup) &&
-         !IsSVECalleeSave(MBBI)) {
+         !isPartOfSVECalleeSaves(MBBI)) {
     if (CombineSPBump &&
         // Only fix-up frame-setup load/store instructions.
         (!requiresSaveVG(MF) || !isVGInstruction(MBBI)))
@@ -2278,8 +2271,9 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
                         << PPRCalleeSavesSize.getScalable() << "\n");
 
       PPRCalleeSavesBegin = MBBI;
-      assert(IsPPRCalleeSave(PPRCalleeSavesBegin) && "Unexpected instruction");
-      while (IsPPRCalleeSave(MBBI) && MBBI != MBB.getFirstTerminator())
+      assert(isPartOfPPRCalleeSaves(PPRCalleeSavesBegin) &&
+             "Unexpected instruction");
+      while (isPartOfPPRCalleeSaves(MBBI) && MBBI != MBB.getFirstTerminator())
         ++MBBI;
       PPRCalleeSavesEnd = MBBI;
     }
@@ -2288,8 +2282,9 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
       LLVM_DEBUG(dbgs() << "ZPRCalleeSavedStackSize = "
                         << ZPRCalleeSavesSize.getScalable() << "\n");
       ZPRCalleeSavesBegin = MBBI;
-      assert(IsZPRCalleeSave(ZPRCalleeSavesBegin) && "Unexpected instruction");
-      while (IsZPRCalleeSave(MBBI) && MBBI != MBB.getFirstTerminator())
+      assert(isPartOfZPRCalleeSaves(ZPRCalleeSavesBegin) &&
+             "Unexpected instruction");
+      while (isPartOfZPRCalleeSaves(MBBI) && MBBI != MBB.getFirstTerminator())
         ++MBBI;
       ZPRCalleeSavesEnd = MBBI;
     }
@@ -2523,7 +2518,7 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   while (LastPopI != Begin) {
     --LastPopI;
     if (!LastPopI->getFlag(MachineInstr::FrameDestroy) ||
-        (!FPAfterSVECalleeSaves && IsSVECalleeSave(LastPopI))) {
+        (!FPAfterSVECalleeSaves && isPartOfSVECalleeSaves(LastPopI))) {
       ++LastPopI;
       break;
     } else if (CombineSPBump)
@@ -2608,11 +2603,12 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
 
     RestoreBegin = std::prev(RestoreEnd);
     while (RestoreBegin != MBB.begin() &&
-           IsSVECalleeSave(std::prev(RestoreBegin)))
+           isPartOfSVECalleeSaves(std::prev(RestoreBegin)))
       --RestoreBegin;
 
-    assert(IsSVECalleeSave(RestoreBegin) &&
-           IsSVECalleeSave(std::prev(RestoreEnd)) && "Unexpected instruction");
+    assert(isPartOfSVECalleeSaves(RestoreBegin) &&
+           isPartOfSVECalleeSaves(std::prev(RestoreEnd)) &&
+           "Unexpected instruction");
 
     StackOffset CalleeSavedSizeAsOffset =
         StackOffset::getScalable(SVECalleeSavedSize);
@@ -4315,14 +4311,14 @@ determineSVEStackObjectOffsets(MachineFunction &MF, bool AssignOffsets,
                                bool SplitSVEObjects = false) {
   MachineFrameInfo &MFI = MF.getFrameInfo();
 
-  int64_t ZPRStack = 0;
-  int64_t PPRStack = 0;
+  SVEStackSizes SVEStack{};
 
-  auto [ZPROffset, PPROffset] = [&] {
-    if (SplitSVEObjects)
-      return std::tie(ZPRStack, PPRStack);
-    return std::tie(ZPRStack, ZPRStack);
-  }();
+  // With SplitSVEObjects we maintain separate stack offsets for predicates
+  // (PPRs) and SVE vectors (ZPRs). When SplitSVEObjects is disabled predicates
+  // are included in the SVE vector area.
+  int64_t &ZPROffset = SVEStack.ZPRStackSize;
+  int64_t &PPROffset =
+      SplitSVEObjects ? SVEStack.PPRStackSize : SVEStack.ZPRStackSize;
 
 #ifndef NDEBUG
   // First process all fixed stack objects.
@@ -4404,14 +4400,7 @@ determineSVEStackObjectOffsets(MachineFunction &MF, bool AssignOffsets,
 
   PPROffset = alignTo(PPROffset, Align(16U));
   ZPROffset = alignTo(ZPROffset, Align(16U));
-
-  if (&ZPROffset != &PPROffset) {
-    // SplitSVEObjects (PPRs and ZPRs allocated to separate areas).
-    return SVEStackSizes{ZPROffset, PPROffset};
-  }
-  // When SplitSVEObjects is disabled just attribute all the stack to ZPRs.
-  // Determining the split is not necessary.
-  return SVEStackSizes{ZPROffset, 0};
+  return SVEStack;
 }
 
 SVEStackSizes
@@ -4736,8 +4725,7 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
          "Upwards growing stack unsupported");
 
   auto [ZPRStackSize, PPRStackSize] = assignSVEStackObjectOffsets(MF);
-  AFI->setStackSizeZPR(ZPRStackSize);
-  AFI->setStackSizePPR(PPRStackSize);
+  AFI->setStackSizeSVE(ZPRStackSize, PPRStackSize);
 
   // If this function isn't doing Win64-style C++ EH, we don't need to do
   // anything.
@@ -5269,7 +5257,8 @@ StackOffset AArch64FrameLowering::getFrameIndexReferencePreferSP(
   }
 
   // Go to common code if we cannot provide sp + offset.
-  if (MFI.hasVarSizedObjects() || hasSVEStackSize(MF) ||
+  if (MFI.hasVarSizedObjects() ||
+      MF.getInfo<AArch64FunctionInfo>()->hasSVEStackSize() ||
       MF.getSubtarget().getRegisterInfo()->hasStackRealignment(MF))
     return getFrameIndexReference(MF, FI, FrameReg);
 

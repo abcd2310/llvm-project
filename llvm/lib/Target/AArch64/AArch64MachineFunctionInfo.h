@@ -297,20 +297,20 @@ public:
     TailCallReservedStack = bytes;
   }
 
-  void setStackSizeZPR(uint64_t S) {
+  void setStackSizeSVE(uint64_t ZPR, uint64_t PPR = 0) {
+    StackSizeZPR = ZPR;
+    StackSizePPR = PPR;
     HasCalculatedStackSizeSVE = true;
-    StackSizeZPR = S;
-  }
-
-  void setStackSizePPR(uint64_t S) {
-    HasCalculatedStackSizeSVE = true;
-    StackSizePPR = S;
   }
 
   uint64_t getStackSizeZPR() const { return StackSizeZPR; }
   uint64_t getStackSizePPR() const { return StackSizePPR; }
 
   bool hasCalculatedStackSizeSVE() const { return HasCalculatedStackSizeSVE; }
+
+  bool hasSVEStackSize() const {
+    return getStackSizeZPR() > 0 || getStackSizePPR() > 0;
+  }
 
   bool hasStackFrame() const { return HasStackFrame; }
   void setHasStackFrame(bool s) { HasStackFrame = s; }
